@@ -1,0 +1,76 @@
+- name: Deploy Laravel three-tier app on Kubernetes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ns: laravel
+    db_name: laravel
+    db_user: laravel
+    db_password: "LabDbPass123"
+    db_root_password: "LabRootPass123"
+    app_key: "base64:{{ 'abcdefghijklmnopqrstuvwxyz123456' | b64encode }}"
+  tasks:
+    - name: Create namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ ns }}"
+
+    - name: Create secret with DB credentials and app key
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ ns }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: laravel-secrets
+          type: Opaque
+          stringData:
+            DB_DATABASE: "{{ db_name }}"
+            DB_USERNAME: "{{ db_user }}"
+            DB_PASSWORD: "{{ db_password }}"
+            DB_ROOT_PASSWORD: "{{ db_root_password }}"
+            APP_KEY: "{{ app_key }}"
+
+    - name: Deploy tiers in order (database, application, presentation)
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ ns }}"
+        src: "{{ playbook_dir }}/../k8s/{{ item }}"
+        wait: true
+        wait_timeout: 300
+      loop:
+        - mysql.yaml
+        - app.yaml
+        - nginx.yaml
+
+    - name: Find a Laravel pod
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ns }}"
+        label_selectors: ["app=laravel-app"]
+      register: app_pods
+
+    - name: Run database migrations (proves DB connectivity)
+      kubernetes.core.k8s_exec:
+        namespace: "{{ ns }}"
+        pod: "{{ app_pods.resources[0].metadata.name }}"
+        command: php artisan migrate --force
+      register: migrate
+
+    - name: Show migration output
+      ansible.builtin.debug:
+        var: migrate.stdout_lines
+
+    - name: Verify the app is accessible
+      ansible.builtin.uri:
+        url: http://localhost:30080
+        status_code: 200
+      register: web
+      retries: 10
+      delay: 5
+      until: web.status == 200
